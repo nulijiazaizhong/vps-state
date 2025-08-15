@@ -4,6 +4,7 @@ import { useEffect, useState, useRef } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts';
+import { Skeleton } from "@/components/ui/skeleton";
 import {
   ChartConfig,
   ChartContainer,
@@ -386,7 +387,7 @@ export default function Home() {
           <h2 className="text-2xl font-semibold mb-4">服务器状态</h2>
           <div className="space-y-6">
             {chunk([...servers].reverse().filter(s => s && s.id != null), 4).map((serverRow, rowIndex) => (
-              <div key={serverRow.map(s => s.id).join('-') || rowIndex}>
+              <div key={rowIndex}>
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
                   {serverRow.map((server) => (
                     <Card
@@ -466,9 +467,7 @@ export default function Home() {
                       })}
                             </div>
                             {isLoadingTcping ? (
-                              <div className="flex justify-center items-center h-[300px]">
-                                <p>图表加载中...</p>
-                              </div>
+                              <Skeleton className="h-[300px] w-full" />
                             ) : (
                               <ChartContainer
                                 config={monitorNames.reduce((acc, name, index) => {
@@ -518,7 +517,7 @@ export default function Home() {
                                       monitorNames.map((name, index) => ({
                                         value: name,
                                         color: getDistinctColor(index),
-                                        type: "line"
+                                        type: "line" as const
                                       })).reverse()
                                     } />
                                   } />
@@ -528,10 +527,10 @@ export default function Home() {
                                         key={name}
                                         dataKey={name}
                                         type="natural"
-                                        fill={`url(#color-${index})`}
+                                        fill={`url(#color-${name})`}
                                         stroke={getDistinctColor(index)}
                                         stackId="a"
-                                        animationDuration={1000}
+                                        animationDuration={300}
                                       />
                                     );
                                   })}
