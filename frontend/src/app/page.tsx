@@ -4,6 +4,14 @@ import { useEffect, useState, useRef } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts';
+import {
+  ChartConfig,
+  ChartContainer,
+  ChartLegend,
+  ChartLegendContent,
+  ChartTooltip,
+  ChartTooltipContent,
+} from "@/components/ui/chart";
 
 // --- 从后端API获取的服务器数据类型 (JOINed) ---
 // 该接口反映了后端 `servers` 表和 `server_state` 表 JOIN 后的数据结构
@@ -182,6 +190,8 @@ export default function Home() {
   const [tcpingData, setTcpingData] = useState<TransformedTcpingData[]>([]);
   const [monitorNames, setMonitorNames] = useState<string[]>([]);
   const [selectedServer, setSelectedServer] = useState<TranslatedServer | null>(null);
+  const [isLoadingTcping, setIsLoadingTcping] = useState(true);
+  const [timeRange, setTimeRange] = useState("1h");
   const selectedServerIdRef = useRef<number | null>(null); // 使用 Ref 来避免闭包陷阱
 
   // --- 新增 Refs 来解决 setInterval 的闭包陷阱 ---
@@ -269,15 +279,16 @@ export default function Home() {
     if (!selectedServer) return;
 
     // --- 当服务器切换时，重置状态 ---
+    setIsLoadingTcping(true);
     setTcpingData([]);
     setMonitorNames([]);
     lastTimestampRef.current = null;
 
-    const fetchAndProcessTcpingData = async (isInitial: boolean) => {
+    const fetchAndProcessTcpingData = async (isInitial: boolean, since?: string) => {
       try {
         let url = `http://localhost:8000/api/tcping/${selectedServer.id}`;
-        if (!isInitial && lastTimestampRef.current) {
-          url += `?since=${encodeURIComponent(lastTimestampRef.current)}`;
+        if (since) {
+          url += `?since=${encodeURIComponent(since)}&resample=5m`; // 提高降采样力度
         }
 
         const response = await fetch(url);
@@ -344,11 +355,17 @@ export default function Home() {
 
       } catch (error) {
         console.error(`获取服务器 ${selectedServer.id} 的 TCPing 数据失败:`, error);
+      } finally {
+        if (isInitial) {
+          setIsLoadingTcping(false);
+        }
       }
     };
 
-    fetchAndProcessTcpingData(true);
-    const interval = setInterval(() => fetchAndProcessTcpingData(false), 5000);
+    const twentyFourHoursAgo = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+    fetchAndProcessTcpingData(true, twentyFourHoursAgo);
+
+    const interval = setInterval(() => fetchAndProcessTcpingData(false, lastTimestampRef.current || undefined), 5000);
     return () => clearInterval(interval);
   }, [selectedServer?.id]);
 
@@ -437,77 +454,90 @@ export default function Home() {
                   </CardHeader>
                   <CardContent className="pt-6">
                             <div className="mb-4 flex flex-wrap gap-x-4 gap-y-2 text-sm text-muted-foreground">
-                      {tcpingData.length > 0 && [...monitorNames].reverse().map((name) => {
+                      {tcpingData.length > 0 && monitorNames.map((name, index) => {
                         const latestDataPoint = tcpingData[tcpingData.length - 1];
                         const value = latestDataPoint[name];
-                        const originalIndex = monitorNames.indexOf(name);
                         return (
                           <div key={name} className="flex items-center gap-2">
-                            <span className="h-2 w-2 rounded-full" style={{ backgroundColor: getDistinctColor(originalIndex) }} />
+                            <span className="h-2 w-2 rounded-full" style={{ backgroundColor: getDistinctColor(index) }} />
                             <span>{name}: <strong>{value != null ? `${value.toFixed(2)} ms` : 'N/A'}</strong></span>
                           </div>
                         );
                       })}
                             </div>
-                            <ResponsiveContainer key={selectedServer.id} width="100%" height={300}>
-                              <AreaChart data={tcpingData}>
-                                <defs>
+                            {isLoadingTcping ? (
+                              <div className="flex justify-center items-center h-[300px]">
+                                <p>图表加载中...</p>
+                              </div>
+                            ) : (
+                              <ChartContainer
+                                config={monitorNames.reduce((acc, name, index) => {
+                                  acc[name] = {
+                                    label: name,
+                                    color: getDistinctColor(index),
+                                  };
+                                  return acc;
+                                }, {} as ChartConfig)}
+                                className="aspect-auto h-[300px] w-full"
+                              >
+                                <AreaChart data={tcpingData}>
+                                  <defs>
+                                    {monitorNames.map((name, index) => {
+                                      const color = getDistinctColor(index);
+                                      return (
+                                        <linearGradient key={`color-${name}`} id={`color-${name}`} x1="0" y1="0" x2="0" y2="1">
+                                          <stop offset="5%" stopColor={color} stopOpacity={0.8} />
+                                          <stop offset="95%" stopColor={color} stopOpacity={0.1} />
+                                        </linearGradient>
+                                      );
+                                    })}
+                                  </defs>
+                                  <CartesianGrid vertical={false} />
+                                  <XAxis
+                                    dataKey="created_at"
+                                    tickLine={false}
+                                    axisLine={false}
+                                    tickMargin={8}
+                                    minTickGap={32}
+                                    type="number"
+                                    scale="time"
+                                    domain={['dataMin', 'dataMax']}
+                                    tickFormatter={(unixTime) => new Date(unixTime).toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit' })}
+                                  />
+                                  <ChartTooltip
+                                    cursor={false}
+                                    content={
+                                      <ChartTooltipContent
+                                        labelFormatter={(value) => new Date(value).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}
+                                        indicator="dot"
+                                      />
+                                    }
+                                  />
+                                  <ChartLegend content={
+                                    <ChartLegendContent payload={
+                                      monitorNames.map((name, index) => ({
+                                        value: name,
+                                        color: getDistinctColor(index),
+                                        type: "line"
+                                      })).reverse()
+                                    } />
+                                  } />
                                   {monitorNames.map((name, index) => {
-                                    const color = getDistinctColor(index);
                                     return (
-                                      <linearGradient key={`color-${name}`} id={`color-${name}`} x1="0" y1="0" x2="0" y2="1">
-                                        <stop offset="5%" stopColor={color} stopOpacity={0.8}/>
-                                        <stop offset="95%" stopColor={color} stopOpacity={0}/>
-                                      </linearGradient>
+                                      <Area
+                                        key={name}
+                                        dataKey={name}
+                                        type="natural"
+                                        fill={`url(#color-${index})`}
+                                        stroke={getDistinctColor(index)}
+                                        stackId="a"
+                                        animationDuration={1000}
+                                      />
                                     );
                                   })}
-                                </defs>
-                                <CartesianGrid strokeDasharray="3 3" stroke="rgba(0, 0, 0, 0.1)" />
-                                <XAxis 
-                                  dataKey="created_at" 
-                                  type="number"
-                                  scale="time"
-                                  domain={['dataMin', 'dataMax']}
-                                  stroke="rgba(0, 0, 0, 0.5)"
-                                  tickFormatter={(unixTime) => new Date(unixTime).toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit' })}
-                                  interval="preserveStartEnd"
-                                  tickCount={10}
-                                />
-                                <YAxis stroke="rgba(0, 0, 0, 0.5)" unit="ms"/>
-                        <Tooltip
-                          wrapperStyle={{ zIndex: 9999 }}
-                          contentStyle={{
-                            backgroundColor: 'rgba(255, 255, 255, 0.75)',
-                            border: '1px solid rgba(0, 0, 0, 0.1)',
-                            backdropFilter: 'blur(4px)',
-                            WebkitBackdropFilter: 'blur(4px)',
-                            borderRadius: '0.5rem',
-                            boxShadow: '0 4px 6px rgba(0, 0, 0, 0.1)',
-                          }}
-                          labelStyle={{ color: '#1f2937', fontWeight: 'bold' }}
-                          labelFormatter={(unixTime) => new Date(unixTime).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}
-                        />
-                                <Legend verticalAlign="bottom" height={36}/>
-                        {[...monitorNames].reverse().filter(name => name != null).map((name) => {
-                          const originalIndex = monitorNames.indexOf(name);
-                          const color = getDistinctColor(originalIndex);
-                          return (
-                            <Area 
-                              key={name}
-                              type="monotone" 
-                              dataKey={name}
-                              stroke={color}
-                              fill={`url(#color-${name})`}
-                              fillOpacity={1}
-                              name={name}
-                              unit="ms"
-                              connectNulls={true}
-                              strokeWidth={2}
-                            />
-                          );
-                        })}
-                              </AreaChart>
-                            </ResponsiveContainer>
+                                </AreaChart>
+                              </ChartContainer>
+                            )}
                           </CardContent>
                         </Card>
                       </TabsContent>
