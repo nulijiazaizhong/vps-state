@@ -324,20 +324,37 @@ async def get_service_history(server_id: int):
         history_list = sorted([dict(row) for row in rows], key=lambda x: x['created_at'])
         return {"data": history_list}
 
+from fastapi import Query
+from typing import Optional
+
 @app.get("/api/tcping/{server_id}")
-async def get_tcping_history(server_id: int):
+async def get_tcping_history(server_id: int, since: Optional[str] = Query(None)):
     """
     获取指定服务器的 TCPING 历史数据。
+    支持 `since` 查询参数，用于增量获取。
     """
     with get_db_connection() as conn:
-        query = """
-            SELECT * FROM tcping_history
-            WHERE server_id = ?
-            ORDER BY created_at DESC
-            LIMIT 200;
-        """
-        rows = conn.execute(query, (server_id,)).fetchall()
-        history_list = sorted([dict(row) for row in rows], key=lambda x: x['created_at'])
+        if since:
+            # 如果提供了 `since` 参数，则只获取该时间之后的数据
+            query = """
+                SELECT * FROM tcping_history
+                WHERE server_id = ? AND created_at > ?
+                ORDER BY created_at ASC;
+            """
+            rows = conn.execute(query, (server_id, since)).fetchall()
+            history_list = [dict(row) for row in rows]
+        else:
+            # 否则，获取最新的200条记录
+            query = """
+                SELECT * FROM tcping_history
+                WHERE server_id = ?
+                ORDER BY created_at DESC
+                LIMIT 200;
+            """
+            rows = conn.execute(query, (server_id,)).fetchall()
+            # 为了图表显示，最好按时间升序排列
+            history_list = sorted([dict(row) for row in rows], key=lambda x: x['created_at'])
+        
         return {"data": history_list}
 
 # --- 启动入口 ---
