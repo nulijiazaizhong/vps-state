@@ -76,7 +76,7 @@ interface TcpingDataPoint {
 
 // --- 新增：为 Recharts 转换后的数据格式 ---
 interface TransformedTcpingData {
-  created_at: string;
+  created_at: number; // Changed to store timestamp
   [key: string]: any; // 允许动态添加监控点名称作为键
 }
 
@@ -129,7 +129,7 @@ const formatServerData = (server: Server): TranslatedServer => {
   const safeGet = (value: any, defaultValue: number = 0) => value ?? defaultValue;
 
   const lastActiveDisplay = server.last_active 
-    ? new Date(server.last_active).toLocaleString('zh-CN')
+    ? new Date(server.last_active).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })
     : 'N/A';
 
   return {
@@ -284,67 +284,59 @@ export default function Home() {
         const data = await response.json();
         const rawData: TcpingDataPoint[] = data.data || [];
 
+        if (isInitial && rawData.length > 0) {
+          console.log(`[Debug] Initial fetch received ${rawData.length} data points.`);
+          console.log(`[Debug] Time range: ${rawData[0].created_at} to ${rawData[rawData.length - 1].created_at}`);
+        }
+
         if (rawData.length === 0 && !isInitial) return;
 
-        // --- 1. 数据转换 ---
-        const transformed: { [key: string]: TransformedTcpingData } = {};
+        // --- 1. 数据转换 (将 created_at 转换为时间戳) ---
+        const transformed: { [key: string]: any } = {};
         const newMonitors = new Set<string>();
         rawData.forEach(point => {
           const time = point.created_at;
-          if (!transformed[time]) transformed[time] = { created_at: time };
+          if (!transformed[time]) transformed[time] = { created_at: new Date(time).getTime() };
           transformed[time][point.monitor_name] = point.avg_delay;
           newMonitors.add(point.monitor_name);
         });
-        const newChartData = Object.values(transformed);
+        const newChartData: TransformedTcpingData[] = Object.values(transformed);
 
-        // --- 2. 获取当前状态和所有监控点名称 ---
-        const prevData = tcpingDataRef.current;
-        const prevNames = monitorNamesRef.current;
-        const allMonitorNames = Array.from(new Set([...prevNames, ...newMonitors])).filter(name => name != null);
-
-        // --- 3. 合并并排序数据 ---
-        const dataMap = new Map<string, TransformedTcpingData>();
-        prevData.forEach(item => dataMap.set(item.created_at, item));
-        newChartData.forEach(item => dataMap.set(item.created_at, item));
-        const combinedData = Array.from(dataMap.values()).sort((a, b) => 
-          new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
-        );
-
-        // --- 4. 最终解决方案：双向填充，彻底解决数据断层 ---
-
-        // 第一步：为每个监控项找到其第一个有效值作为基准
-        const firstAvailableValues: { [key: string]: number } = {};
-        for (const name of allMonitorNames) {
-          const firstPointWithValue = combinedData.find(p => p[name] !== undefined);
-          if (firstPointWithValue) {
-            firstAvailableValues[name] = firstPointWithValue[name] as number;
-          }
-        }
-
-        // 第二步：使用“最后已知值”策略进行遍历填充
-        // 初始化“最后已知值”为第一步找到的基准值
-        const lastKnownValues = { ...firstAvailableValues };
-        for (const dataPoint of combinedData) {
-          for (const name of allMonitorNames) {
-            if (dataPoint[name] !== undefined) {
-              // 如果当前点有值，更新“最后已知值”
-              lastKnownValues[name] = dataPoint[name];
-            } else {
-              // 如果当前点没有值，用“最后已知值”进行填充
-              dataPoint[name] = lastKnownValues[name];
-            }
-          }
-        }
-
-        // --- 5. 应用数据窗口 ---
-        const MAX_DATA_POINTS = 300;
-        const finalData = combinedData.slice(-MAX_DATA_POINTS);
-
-        // --- 6. 更新状态 ---
-        setTcpingData(finalData);
+        // --- 2. 获取所有监控点名称 ---
+        const allMonitorNames = Array.from(new Set([...monitorNamesRef.current, ...newMonitors])).filter(name => name != null);
         setMonitorNames(allMonitorNames);
 
-        // --- 7. 更新最新时间戳 ---
+        // --- 3. 使用函数式更新来原子化地处理所有数据 ---
+        setTcpingData(currentData => {
+          // 合并并排序数据 (基于时间戳)
+          const dataMap = new Map<number, TransformedTcpingData>();
+          currentData.forEach(item => dataMap.set(item.created_at, item));
+          newChartData.forEach(item => dataMap.set(item.created_at, item));
+          const combinedData = Array.from(dataMap.values()).sort((a, b) => a.created_at - b.created_at);
+
+          // 双向填充，解决数据断层
+          const firstAvailableValues: { [key: string]: number } = {};
+          for (const name of allMonitorNames) {
+            const firstPointWithValue = combinedData.find(p => p[name] !== undefined);
+            if (firstPointWithValue) {
+              firstAvailableValues[name] = firstPointWithValue[name] as number;
+            }
+          }
+          const lastKnownValues = { ...firstAvailableValues };
+          for (const dataPoint of combinedData) {
+            for (const name of allMonitorNames) {
+              if (dataPoint[name] !== undefined) {
+                lastKnownValues[name] = dataPoint[name];
+              } else {
+                dataPoint[name] = lastKnownValues[name];
+              }
+            }
+          }
+          
+          return combinedData;
+        });
+
+        // --- 4. 更新最新时间戳 ---
         const latestTimestamp = rawData[rawData.length - 1]?.created_at;
         if (latestTimestamp) {
           lastTimestampRef.current = latestTimestamp;
@@ -377,7 +369,7 @@ export default function Home() {
           <h2 className="text-2xl font-semibold mb-4">服务器状态</h2>
           <div className="space-y-6">
             {chunk([...servers].reverse().filter(s => s && s.id != null), 4).map((serverRow, rowIndex) => (
-              <div key={rowIndex}>
+              <div key={serverRow.map(s => s.id).join('-') || rowIndex}>
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
                   {serverRow.map((server) => (
                     <Card
@@ -432,9 +424,18 @@ export default function Home() {
                         </Card>
                       </TabsContent>
                       <TabsContent value="tcping">
-                        <Card>
-                          <CardHeader><CardTitle>TCPing 延迟 (ms)</CardTitle></CardHeader>
-                          <CardContent className="pt-6">
+                <Card>
+                  <CardHeader>
+                    <div className="flex justify-between items-center">
+                      <CardTitle>TCPing 延迟 (ms)</CardTitle>
+                      {tcpingData.length > 1 && (
+                        <p className="text-xs text-muted-foreground">
+                          {new Date(tcpingData[0].created_at).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })} - {new Date(tcpingData[tcpingData.length - 1].created_at).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}
+                        </p>
+                      )}
+                    </div>
+                  </CardHeader>
+                  <CardContent className="pt-6">
                             <div className="mb-4 flex flex-wrap gap-x-4 gap-y-2 text-sm text-muted-foreground">
                       {tcpingData.length > 0 && [...monitorNames].reverse().map((name) => {
                         const latestDataPoint = tcpingData[tcpingData.length - 1];
@@ -464,8 +465,13 @@ export default function Home() {
                                 <CartesianGrid strokeDasharray="3 3" stroke="rgba(0, 0, 0, 0.1)" />
                                 <XAxis 
                                   dataKey="created_at" 
+                                  type="number"
+                                  scale="time"
+                                  domain={['dataMin', 'dataMax']}
                                   stroke="rgba(0, 0, 0, 0.5)"
-                                  tickFormatter={(timeStr) => new Date(timeStr).toLocaleTimeString()}
+                                  tickFormatter={(unixTime) => new Date(unixTime).toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit' })}
+                                  interval="preserveStartEnd"
+                                  tickCount={10}
                                 />
                                 <YAxis stroke="rgba(0, 0, 0, 0.5)" unit="ms"/>
                         <Tooltip
@@ -479,7 +485,7 @@ export default function Home() {
                             boxShadow: '0 4px 6px rgba(0, 0, 0, 0.1)',
                           }}
                           labelStyle={{ color: '#1f2937', fontWeight: 'bold' }}
-                          labelFormatter={(label) => new Date(label).toLocaleString('zh-CN')}
+                          labelFormatter={(unixTime) => new Date(unixTime).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}
                         />
                                 <Legend verticalAlign="bottom" height={36}/>
                         {[...monitorNames].reverse().filter(name => name != null).map((name) => {

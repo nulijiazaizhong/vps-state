@@ -5,6 +5,7 @@ import sys
 import threading
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 import subprocess
 import requests
 import websockets
@@ -107,16 +108,38 @@ def init_db():
 async def fetch_and_store_tcping_history():
     """
     从 Nezha API 获取所有服务器的 TCPING 历史数据并存入数据库。
+    改为增量更新，以避免重复获取并解决数据点限制问题。
     """
-    print("Starting to fetch TCPING history for all servers...")
+    print("Starting to fetch TCPING history for all servers (incremental update)...")
     try:
         with get_db_connection() as conn:
             server_rows = conn.execute("SELECT id FROM servers").fetchall()
             server_ids = [row['id'] for row in server_rows]
 
+        end_ts = int(time.time() * 1000)
+
         for server_id in server_ids:
             try:
-                api_url = f"https://{NEZHA_HOST}/api/v1/service/{server_id}"
+                # 1. 查找该服务器最新的时间戳
+                with get_db_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "SELECT MAX(created_at) FROM tcping_history WHERE server_id = ?",
+                        (server_id,)
+                    )
+                    last_timestamp_str = cursor.fetchone()[0]
+
+                # 2. 计算起始时间
+                if last_timestamp_str:
+                    # 从最后一个时间点之后的一秒开始获取，避免重复
+                    last_dt = datetime.fromisoformat(last_timestamp_str.replace('Z', '+00:00'))
+                    start_ts = int(last_dt.timestamp() * 1000) + 1000 # 加1秒
+                else:
+                    # 如果没有数据，则获取过去24小时
+                    start_ts = end_ts - (24 * 3600 * 1000)
+
+                # 3. 调用API
+                api_url = f"https://{NEZHA_HOST}/api/v1/service/{server_id}?start={start_ts}&end={end_ts}"
                 response = await asyncio.to_thread(requests.get, api_url, timeout=15)
                 response.raise_for_status()
                 
@@ -137,7 +160,7 @@ async def fetch_and_store_tcping_history():
                     for ts, delay in zip(timestamps, delays):
                         if delay is None: continue # 跳过空值
                         # 时间戳是毫秒，转换为ISO 8601格式的字符串 (UTC)
-                        dt_object = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(ts / 1000))
+                        dt_object = datetime.fromtimestamp(ts / 1000, tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
                         records_to_insert.append((server_id, monitor_name, delay, dt_object))
 
                     if records_to_insert:
@@ -251,12 +274,12 @@ async def fetch_nezha_ws():
         print(f"[WebSocket] Error: {e}")
 
 # --- 后台任务 ---
-async def periodic_ws_task(interval=60):
+async def periodic_ws_task(interval=600):
     while True:
         await fetch_nezha_ws()
         await asyncio.sleep(interval)
 
-async def periodic_tcping_task(interval=300):
+async def periodic_tcping_task(interval=30):
     """定期获取TCPING数据"""
     while True:
         await fetch_and_store_tcping_history()
@@ -272,8 +295,8 @@ async def periodic_cleanup_task(interval=86400):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
-    asyncio.create_task(periodic_ws_task(60))
-    asyncio.create_task(periodic_tcping_task(300)) # 5分钟一次
+    asyncio.create_task(periodic_ws_task(600)) # 10分钟一次
+    asyncio.create_task(periodic_tcping_task(30)) # 30秒一次
     asyncio.create_task(periodic_cleanup_task(86400)) # 每天清理一次
     
     # 启动时立即获取和清理一次
@@ -315,13 +338,11 @@ async def get_service_history(server_id: int):
     with get_db_connection() as conn:
         query = """
             SELECT * FROM server_state
-            WHERE server_id = ?
-            ORDER BY created_at DESC
-            LIMIT 200;
+            WHERE server_id = ? AND created_at >= strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-24 hours')
+            ORDER BY created_at ASC;
         """
         rows = conn.execute(query, (server_id,)).fetchall()
-        # 为了图表显示，最好按时间升序排列
-        history_list = sorted([dict(row) for row in rows], key=lambda x: x['created_at'])
+        history_list = [dict(row) for row in rows]
         return {"data": history_list}
 
 from fastapi import Query
@@ -344,16 +365,14 @@ async def get_tcping_history(server_id: int, since: Optional[str] = Query(None))
             rows = conn.execute(query, (server_id, since)).fetchall()
             history_list = [dict(row) for row in rows]
         else:
-            # 否则，获取最新的200条记录
+            # 否则，获取过去24小时的数据 (使用更健壮的 strftime)
             query = """
                 SELECT * FROM tcping_history
-                WHERE server_id = ?
-                ORDER BY created_at DESC
-                LIMIT 200;
+                WHERE server_id = ? AND created_at >= strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-24 hours')
+                ORDER BY created_at ASC;
             """
             rows = conn.execute(query, (server_id,)).fetchall()
-            # 为了图表显示，最好按时间升序排列
-            history_list = sorted([dict(row) for row in rows], key=lambda x: x['created_at'])
+            history_list = [dict(row) for row in rows]
         
         return {"data": history_list}
 
