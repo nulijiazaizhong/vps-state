@@ -15,9 +15,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 # --- 确保依赖版本 ---
-print("Ensuring correct websockets version is installed...")
-subprocess.check_call([sys.executable, "-m", "pip", "install", "websockets==10.4"])
-print("Websockets version check complete.")
+# Dependencies are managed by requirements.txt in Docker environment.
+print("Dependencies are installed via requirements.txt.")
 
 # Windows asyncio 兼容处理
 if sys.platform == "win32" and sys.version_info >= (3, 8):

@@ -196,9 +196,10 @@ export default function Home() {
   let formatter = useDateFormatter({ dateStyle: "long" });
 
   useEffect(() => {
+    const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
     const fetchServers = async () => {
       try {
-        const response = await fetch("http://localhost:8000/api/servers");
+        const response = await fetch(`${API_URL}/api/servers`);
         if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
         const data = await response.json();
         const serversFromApi: Server[] = data.servers || [];
@@ -226,9 +227,10 @@ export default function Home() {
     setMonitorNames([]);
 
     const fetchAndProcessTcpingData = async () => {
+      const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
       setInsufficientDataMessage("");
       try {
-        let url = `http://localhost:8000/api/tcping/${selectedServer.id}`;
+        let url = `${API_URL}/api/tcping/${selectedServer.id}`;
         const params = new URLSearchParams();
         // Always fetch a generous 7-day window to ensure we have enough data for client-side filtering.
         const now = new Date();

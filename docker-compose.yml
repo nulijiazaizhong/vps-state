@@ -1,0 +1,30 @@
+services:
+  # 后端 FastAPI 服务
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      # 使用具名数据卷来持久化 SQLite 数据库
+      - db-data:/app
+    restart: unless-stopped
+
+  # 前端 Next.js 服务
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      # 将后端服务的地址通过环境变量注入到前端容器
+      - NEXT_PUBLIC_API_URL=http://backend:8000
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+# 定义数据卷
+volumes:
+  db-data:
