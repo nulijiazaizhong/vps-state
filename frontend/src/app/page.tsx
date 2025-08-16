@@ -188,8 +188,6 @@ export default function Home() {
   const { setTheme, theme } = useTheme();
   const [activeMonitors, setActiveMonitors] = useState<string[] | null>(null);
   const [activeCategories, setActiveCategories] = useState<string[]>(["移动", "联通", "电信"]);
-  const [allLocations, setAllLocations] = useState<string[]>([]);
-  const [activeLocations, setActiveLocations] = useState<string[]>(["上海", "北京", "广东", "广州"]);
   const [refreshKey, setRefreshKey] = useState(0);
   const [insufficientDataMessage, setInsufficientDataMessage] = useState<string>("");
   const selectedServerIdRef = useRef<number | null>(null);
@@ -255,17 +253,11 @@ export default function Home() {
         const allMonitorNames = Array.from(newMonitors).filter(name => name != null);
         setMonitorNames(allMonitorNames);
 
-        const locations = new Set<string>();
-        const knownPrefixes = ["上海", "北京", "广东", "广州", "江苏"];
-        allMonitorNames.forEach(name => {
-          for (const prefix of knownPrefixes) {
-            if (name.startsWith(prefix)) {
-              locations.add(prefix);
-              break;
-            }
-          }
-        });
-        setAllLocations(Array.from(locations).sort());
+        // Initialize active monitors to all except Jiangsu
+        if (activeMonitors === null) {
+          const defaultMonitors = allMonitorNames.filter(name => !name.includes("江苏"));
+          setActiveMonitors(defaultMonitors);
+        }
 
         setTcpingData(() => {
           const dataMap = new Map<number, TransformedTcpingData>();
@@ -322,7 +314,7 @@ export default function Home() {
       if (newActive.has(monitorName)) newActive.delete(monitorName);
       else newActive.add(monitorName);
       const newActiveArray = Array.from(newActive);
-      return newActiveArray.length === 0 ? null : newActiveArray;
+      return newActiveArray.length === 0 ? [] : newActiveArray;
     });
   };
 
@@ -331,29 +323,21 @@ export default function Home() {
       const newCategories = new Set(prev);
       if (newCategories.has(category)) newCategories.delete(category);
       else newCategories.add(category);
-      setActiveMonitors(null);
-      return Array.from(newCategories);
+      
+      const updatedCategories = Array.from(newCategories);
+      
+      // When category changes, reset active monitors based on the new category selection
+      const newActiveMonitors = monitorNames.filter(name => {
+        return !name.includes("江苏") && updatedCategories.includes(getMonitorCategory(name));
+      });
+      setActiveMonitors(newActiveMonitors);
+
+      return updatedCategories;
     });
   };
 
-  const handleLocationClick = (location: string) => {
-    setActiveLocations(prev => {
-      const newLocations = new Set(prev);
-      if (newLocations.has(location)) {
-        newLocations.delete(location);
-      } else {
-        newLocations.add(location);
-      }
-      setActiveMonitors(null);
-      return Array.from(newLocations);
-    });
-  };
-
-  const categoryFilteredMonitors = monitorNames.filter(name =>
-    activeCategories.includes(getMonitorCategory(name)) &&
-    activeLocations.some(location => name.includes(location))
-  ).sort();
-  const displayedMonitors = activeMonitors ?? categoryFilteredMonitors;
+  const categoryFilteredMonitors = monitorNames.filter(name => activeCategories.includes(getMonitorCategory(name))).sort();
+  const displayedMonitors = activeMonitors ?? [];
 
   // This is the definitive, correct filtering logic.
   const getFilteredData = () => {
@@ -466,23 +450,11 @@ export default function Home() {
                                 </Button>
                               </div>
                             </div>
-                            <div className="mb-4 flex flex-wrap gap-2">
-                              {allLocations.map(location => (
-                                <Button
-                                  key={location}
-                                  variant={activeLocations.includes(location) ? "default" : "outline"}
-                                  size="sm"
-                                  onClick={() => handleLocationClick(location)}
-                                >
-                                  {location}
-                                </Button>
-                              ))}
-                            </div>
                             <div className="grid grid-cols-2 gap-px border-l border-t bg-border sm:grid-cols-3 lg:grid-cols-6">
                               {tcpingData.length > 0 && categoryFilteredMonitors.map(name => {
                                 const latestDataPoint = tcpingData[tcpingData.length - 1];
                                 const value = latestDataPoint?.[name];
-                                const isActive = !activeMonitors || activeMonitors.includes(name);
+                                const isActive = activeMonitors?.includes(name) ?? false;
                                 return (
                                   <div key={name} className={`cursor-pointer p-3 text-center transition-opacity ${isActive ? 'bg-secondary opacity-100' : 'bg-background opacity-50 hover:opacity-75'}`} onClick={() => handleMonitorClick(name)}>
                                     <p className="truncate text-sm text-muted-foreground">{name}</p>
@@ -496,7 +468,7 @@ export default function Home() {
                                 <p className="text-muted-foreground">{insufficientDataMessage || `当前数据量不足${activeRangeLabel || '所选范围'}无法显示，等待后台数据补充之后方可显示`}</p>
                               </div>
                             ) : (
-                              <ChartContainer config={displayedMonitors.reduce((acc, name) => { const index = monitorNames.indexOf(name); acc[name] = { label: name, color: getDistinctColor(index) }; return acc; }, {} as ChartConfig)} className="aspect-auto h-[300px] w-full">
+                              <ChartContainer config={monitorNames.reduce((acc, name) => { const index = monitorNames.indexOf(name); acc[name] = { label: name, color: getDistinctColor(index) }; return acc; }, {} as ChartConfig)} className="aspect-auto h-[300px] w-full">
                                 <AreaChart data={filteredTcpingData}>
                                   <defs>
                                     {monitorNames.map((name, index) => { const color = getDistinctColor(index); return (<linearGradient key={`color-${name}`} id={`color-${name}`} x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor={color} stopOpacity={0.8} /><stop offset="95%" stopColor={color} stopOpacity={0.1} /></linearGradient>); })}
@@ -504,8 +476,8 @@ export default function Home() {
                                   <CartesianGrid vertical={false} />
                                   <XAxis dataKey="created_at" tickLine={false} axisLine={false} tickMargin={8} minTickGap={32} type="number" scale="time" domain={['dataMin', 'dataMax']} tickFormatter={(unixTime) => new Date(unixTime).toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit' })} />
                                   <ChartTooltip cursor={true} content={<ChartTooltipContent labelFormatter={(value) => { if (typeof value !== 'number' || value === null) return '...'; const date = new Date(value); if (isNaN(date.getTime())) return 'Invalid Date'; return date.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }); }} indicator="dot" />} />
-                                  <ChartLegend content={<ChartLegendContent />} />
-                                  {displayedMonitors.map((name) => { const index = monitorNames.indexOf(name); return (<Area key={name} dataKey={name} type="natural" fill={`url(#color-${name})`} stroke={getDistinctColor(index)} stackId="a" animationDuration={300} />); })}
+                                  <ChartLegend onClick={(payload) => handleMonitorClick(payload.dataKey as string)} />
+                                  {displayedMonitors.map((name) => { const index = monitorNames.indexOf(name); return (<Area key={name} dataKey={name} type="natural" fill={`url(#color-${name})`} stroke={getDistinctColor(index)} stackId="a" animationDuration={300} hide={!activeMonitors?.includes(name)} />); })}
                                 </AreaChart>
                               </ChartContainer>
                             )}
