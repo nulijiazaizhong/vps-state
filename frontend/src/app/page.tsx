@@ -4,7 +4,9 @@ import { useEffect, useState, useRef } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts';
+import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { DateRangePicker } from "@/components/ui/date-range-picker";
 import {
   ChartConfig,
   ChartContainer,
@@ -13,22 +15,20 @@ import {
   ChartTooltip,
   ChartTooltipContent,
 } from "@/components/ui/chart";
+import { today, getLocalTimeZone } from "@internationalized/date";
+import { useDateFormatter } from "react-aria";
 
 // --- 从后端API获取的服务器数据类型 (JOINed) ---
-// 该接口反映了后端 `servers` 表和 `server_state` 表 JOIN 后的数据结构
 interface Server {
-  // --- 来自 `servers` 表 ---
   id: number;
   name: string;
-  cpu: string; // 新增：CPU型号信息 (JSON 字符串)
+  cpu: string;
   country_code: string;
   platform: string;
   mem_total: number;
   disk_total: number;
   last_active: string;
   public_note: string;
-
-  // --- 来自 `server_state` 表 ---
   cpu_usage: number;
   mem_used: number;
   disk_used: number;
@@ -65,17 +65,7 @@ interface TranslatedServer {
   到期时间?: string;
 }
 
-// --- 从 /api/service/{id} 获取的历史状态数据点 ---
-interface ServiceDataPoint {
-  id: number;
-  server_id: number;
-  cpu_usage: number;
-  mem_used: number;
-  // ... 可以添加更多需要的字段
-  created_at: string;
-}
-
-// --- 新增：从 /api/tcping/{id} 获取的 TCPing 数据点 ---
+// --- TCPing 数据点 ---
 interface TcpingDataPoint {
   server_id: number;
   monitor_name: string;
@@ -83,12 +73,11 @@ interface TcpingDataPoint {
   created_at: string;
 }
 
-// --- 新增：为 Recharts 转换后的数据格式 ---
+// --- Recharts 转换后的数据格式 ---
 interface TransformedTcpingData {
-  created_at: number; // Changed to store timestamp
-  [key: string]: any; // 允许动态添加监控点名称作为键
+  created_at: number;
+  [key: string]: any;
 }
-
 
 // --- 工具函数 ---
 const formatBytes = (bytes: number, decimals = 2) => {
@@ -109,55 +98,39 @@ const formatUptime = (seconds: number) => {
   return `${days}天 ${hours}小时 ${minutes}分钟`;
 };
 
-// --- 新增：动态颜色生成函数 (黄金角度算法，确保颜色区分度) ---
 const getDistinctColor = (index: number) => {
-  const hue = (index * 137.508) % 360; // 使用黄金角度确保色相分布均匀
+  const hue = (index * 137.508) % 360;
   const saturation = 75;
   const lightness = 55;
   return `hsl(${hue}, ${saturation}%, ${lightness}%)`;
 };
 
-
 // --- 数据格式化函数 ---
 const formatServerData = (server: Server): TranslatedServer => {
   let publicNote = {};
   try {
-    // public_note 字段现在是可选的，需要检查
     const rawPublicNote = server.public_note || '{}';
-    if (rawPublicNote) {
-      publicNote = JSON.parse(rawPublicNote);
-    }
+    if (rawPublicNote) publicNote = JSON.parse(rawPublicNote);
   } catch (e) {
     console.error(`Failed to parse public_note for server ${server.id}:`, e);
   }
 
   const planData = (publicNote as any).planDataMod || {};
   const billingData = (publicNote as any).billingDataMod || {};
-
-  // --- 全面、安全地格式化所有数据 ---
   const safeGet = (value: any, defaultValue: number = 0) => value ?? defaultValue;
 
-  const lastActiveDisplay = server.last_active 
-    ? new Date(server.last_active).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })
-    : 'N/A';
-
   return {
-    // --- 直接映射自 `Server` 对象 ---
     id: server.id,
     名称: server.name,
     国家: server.country_code,
     平台: server.platform,
     负载: safeGet(server.load_1),
-    最后活跃: lastActiveDisplay,
-
-    // --- 格式化和计算 ---
+    最后活跃: server.last_active ? new Date(server.last_active).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : 'N/A',
     CPU: (() => {
       try {
         const cpuCores = JSON.parse(server.cpu || '[]');
         return Array.isArray(cpuCores) && cpuCores.length > 0 ? cpuCores[0] : 'N/A';
-      } catch {
-        return 'N/A';
-      }
+      } catch { return 'N/A'; }
     })(),
     总内存: formatBytes(safeGet(server.mem_total)),
     已用内存: formatBytes(safeGet(server.mem_used)),
@@ -168,8 +141,6 @@ const formatServerData = (server: Server): TranslatedServer => {
     下行速度: `${formatBytes(safeGet(server.net_in_speed))}/s`,
     上行速度: `${formatBytes(safeGet(server.net_out_speed))}/s`,
     在线时间: formatUptime(safeGet(server.uptime)),
-
-    // --- 从 public_note 解析 ---
     带宽: planData.bandwidth,
     月流量: planData.trafficVol,
     网络线路: planData.networkRoute,
@@ -178,132 +149,81 @@ const formatServerData = (server: Server): TranslatedServer => {
   };
 };
 
-// --- 辅助函数：将数组按指定大小分块 ---
 const chunk = <T,>(arr: T[], size: number): T[][] =>
   Array.from({ length: Math.ceil(arr.length / size) }, (v, i) =>
     arr.slice(i * size, i * size + size)
   );
 
+const MONITOR_CATEGORIES = ["移动", "联通", "电信", "国际"];
+const getMonitorCategory = (name: string): string => {
+  if (name.includes("移动")) return "移动";
+  if (name.includes("联通")) return "联通";
+  if (name.includes("电信")) return "电信";
+  if (["GitHub", "YouTube", "Google", "Microsoft", "微软", "谷歌"].some(keyword => name.includes(keyword))) return "国际";
+  return "国际";
+};
+
 // --- 主页面组件 ---
 export default function Home() {
   const [servers, setServers] = useState<TranslatedServer[]>([]);
-  const [serviceData, setServiceData] = useState<ServiceDataPoint[]>([]);
   const [tcpingData, setTcpingData] = useState<TransformedTcpingData[]>([]);
   const [monitorNames, setMonitorNames] = useState<string[]>([]);
   const [selectedServer, setSelectedServer] = useState<TranslatedServer | null>(null);
   const [isLoadingTcping, setIsLoadingTcping] = useState(true);
-  const [timeRange, setTimeRange] = useState("1h");
-  const selectedServerIdRef = useRef<number | null>(null); // 使用 Ref 来避免闭包陷阱
-
-  // --- 新增 Refs 来解决 setInterval 的闭包陷阱 ---
-  const tcpingDataRef = useRef(tcpingData);
-  tcpingDataRef.current = tcpingData;
+  const [date, setDate] = useState({
+    start: today(getLocalTimeZone()).subtract({ days: 7 }),
+    end: today(getLocalTimeZone()),
+  });
+  const [activeMonitors, setActiveMonitors] = useState<string[] | null>(null);
+  const [activeCategories, setActiveCategories] = useState<string[]>(["移动", "联通", "电信"]);
+  const selectedServerIdRef = useRef<number | null>(null);
   const monitorNamesRef = useRef(monitorNames);
   monitorNamesRef.current = monitorNames;
+  let formatter = useDateFormatter({ dateStyle: "long" });
 
-  // 获取服务器列表
   useEffect(() => {
-    // --- 页面加载时，首先尝试从 localStorage 加载缓存数据 ---
-    const cachedData = localStorage.getItem('cachedNezhaServers');
-    if (cachedData) {
-      try {
-        const serversFromCache: Server[] = JSON.parse(cachedData);
-        const formattedServers = serversFromCache.map(formatServerData);
-        setServers(formattedServers);
-        if (!selectedServer && formattedServers.length > 0) {
-          setSelectedServer(formattedServers[0]);
-        }
-      } catch (e) {
-        console.error("Failed to parse cached server data:", e);
-      }
-    }
-
     const fetchServers = async () => {
       try {
         const response = await fetch("http://localhost:8000/api/servers");
-        if (!response.ok) {
-          throw new Error(`HTTP error! status: ${response.status}`);
-        }
+        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
         const data = await response.json();
         const serversFromApi: Server[] = data.servers || [];
-        
-        // --- 请求成功，更新状态并缓存数据 ---
         const formattedServers = serversFromApi.map(formatServerData);
         setServers(formattedServers);
-        localStorage.setItem('cachedNezhaServers', JSON.stringify(serversFromApi)); // 缓存原始API数据
-
-        // 使用 Ref 来更新选择的服务器，避免闭包问题
-        if (selectedServerIdRef.current) {
-          const updatedSelectedServer = formattedServers.find(s => s.id === selectedServerIdRef.current);
-          setSelectedServer(updatedSelectedServer || (formattedServers.length > 0 ? formattedServers[0] : null));
-        } else if (formattedServers.length > 0) {
+        if (!selectedServerIdRef.current && formattedServers.length > 0) {
           const initialServer = formattedServers[0];
           setSelectedServer(initialServer);
           selectedServerIdRef.current = initialServer.id;
-        } else {
-          setSelectedServer(null);
         }
       } catch (error) {
-        console.error("获取服务器失败，将使用缓存数据（如果可用）:", error);
-        // 当请求失败时，我们不做任何操作，因为缓存数据已在初始加载时设置
+        console.error("获取服务器列表失败:", error);
       }
     };
-
-    fetchServers(); // 立即获取一次
-    const interval = setInterval(fetchServers, 5000); // 每5秒刷新一次
+    fetchServers();
+    const interval = setInterval(fetchServers, 5000);
     return () => clearInterval(interval);
-  }, []); // 依赖项为空，确保只在挂载时设置初始缓存和定时器
+  }, []);
 
-  // 获取所选服务器的服务数据
   useEffect(() => {
     if (!selectedServer) return;
-
-    const fetchServiceData = async () => {
-      try {
-        const response = await fetch(`http://localhost:8000/api/service/${selectedServer.id}`);
-        const data = await response.json();
-        setServiceData(data.data || []);
-      } catch (error) {
-        console.error(`获取服务器 ${selectedServer.id} 的服务数据失败:`, error);
-      }
-    };
-
-    fetchServiceData();
-    const interval = setInterval(fetchServiceData, 120000); // 每2分钟刷新一次
-    return () => clearInterval(interval);
-  }, [selectedServer]);
-
-  const lastTimestampRef = useRef<string | null>(null); // Ref to store the last timestamp
-
-  // --- 增强版：获取并处理 TCPing 数据 (增量更新 + 填补数据断层) ---
-  useEffect(() => {
-    if (!selectedServer) return;
-
-    // --- 当服务器切换时，重置状态 ---
     setIsLoadingTcping(true);
     setTcpingData([]);
     setMonitorNames([]);
-    lastTimestampRef.current = null;
 
-    const fetchAndProcessTcpingData = async (isInitial: boolean, since?: string) => {
+    const fetchAndProcessTcpingData = async () => {
       try {
         let url = `http://localhost:8000/api/tcping/${selectedServer.id}`;
-        if (since) {
-          url += `?since=${encodeURIComponent(since)}&resample=5m`; // 提高降采样力度
-        }
+        const params = new URLSearchParams();
+        if (date?.start) params.append("since", date.start.toDate(getLocalTimeZone()).toISOString());
+        if (date?.end) params.append("until", date.end.toDate(getLocalTimeZone()).toISOString());
+        params.append("resample", "5m");
+        const queryString = params.toString();
+        if (queryString) url += `?${queryString}`;
 
         const response = await fetch(url);
         const data = await response.json();
         const rawData: TcpingDataPoint[] = data.data || [];
 
-        if (isInitial && rawData.length > 0) {
-          console.log(`[Debug] Initial fetch received ${rawData.length} data points.`);
-          console.log(`[Debug] Time range: ${rawData[0].created_at} to ${rawData[rawData.length - 1].created_at}`);
-        }
-
-        if (rawData.length === 0 && !isInitial) return;
-
-        // --- 1. 数据转换 (将 created_at 转换为时间戳) ---
         const transformed: { [key: string]: any } = {};
         const newMonitors = new Set<string>();
         rawData.forEach(point => {
@@ -313,75 +233,67 @@ export default function Home() {
           newMonitors.add(point.monitor_name);
         });
         const newChartData: TransformedTcpingData[] = Object.values(transformed);
-
-        // --- 2. 获取所有监控点名称 ---
         const allMonitorNames = Array.from(new Set([...monitorNamesRef.current, ...newMonitors])).filter(name => name != null);
         setMonitorNames(allMonitorNames);
 
-        // --- 3. 使用函数式更新来原子化地处理所有数据 ---
         setTcpingData(currentData => {
-          // 合并并排序数据 (基于时间戳)
           const dataMap = new Map<number, TransformedTcpingData>();
-          currentData.forEach(item => dataMap.set(item.created_at, item));
-          newChartData.forEach(item => dataMap.set(item.created_at, item));
+          [...currentData, ...newChartData].forEach(item => dataMap.set(item.created_at, item));
           const combinedData = Array.from(dataMap.values()).sort((a, b) => a.created_at - b.created_at);
-
-          // 双向填充，解决数据断层
-          const firstAvailableValues: { [key: string]: number } = {};
-          for (const name of allMonitorNames) {
-            const firstPointWithValue = combinedData.find(p => p[name] !== undefined);
-            if (firstPointWithValue) {
-              firstAvailableValues[name] = firstPointWithValue[name] as number;
-            }
-          }
-          const lastKnownValues = { ...firstAvailableValues };
-          for (const dataPoint of combinedData) {
-            for (const name of allMonitorNames) {
-              if (dataPoint[name] !== undefined) {
-                lastKnownValues[name] = dataPoint[name];
-              } else {
-                dataPoint[name] = lastKnownValues[name];
-              }
-            }
-          }
-          
+          const lastKnownValues: { [key: string]: number } = {};
+          allMonitorNames.forEach(name => {
+            const firstPoint = combinedData.find(p => p[name] !== undefined);
+            if (firstPoint) lastKnownValues[name] = firstPoint[name] as number;
+          });
+          combinedData.forEach(dataPoint => {
+            allMonitorNames.forEach(name => {
+              if (dataPoint[name] !== undefined) lastKnownValues[name] = dataPoint[name];
+              else dataPoint[name] = lastKnownValues[name];
+            });
+          });
           return combinedData;
         });
-
-        // --- 4. 更新最新时间戳 ---
-        const latestTimestamp = rawData[rawData.length - 1]?.created_at;
-        if (latestTimestamp) {
-          lastTimestampRef.current = latestTimestamp;
-        }
-
       } catch (error) {
-        console.error(`获取服务器 ${selectedServer.id} 的 TCPing 数据失败:`, error);
+        console.error(`获取 TCPing 数据失败:`, error);
       } finally {
-        if (isInitial) {
-          setIsLoadingTcping(false);
-        }
+        setIsLoadingTcping(false);
       }
     };
-
-    const twentyFourHoursAgo = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
-    fetchAndProcessTcpingData(true, twentyFourHoursAgo);
-
-    const interval = setInterval(() => fetchAndProcessTcpingData(false, lastTimestampRef.current || undefined), 5000);
-    return () => clearInterval(interval);
-  }, [selectedServer?.id]);
-
+    fetchAndProcessTcpingData();
+  }, [selectedServer?.id, date]);
 
   const handleServerSelect = (server: TranslatedServer) => {
     setSelectedServer(server);
-    selectedServerIdRef.current = server.id; // 当用户点击时，更新 Ref
+    selectedServerIdRef.current = server.id;
   };
+
+  const handleMonitorClick = (monitorName: string) => {
+    setActiveMonitors(prev => {
+      if (!prev) return [monitorName];
+      const newActive = new Set(prev);
+      if (newActive.has(monitorName)) newActive.delete(monitorName);
+      else newActive.add(monitorName);
+      const newActiveArray = Array.from(newActive);
+      return newActiveArray.length === 0 ? null : newActiveArray;
+    });
+  };
+
+  const handleCategoryClick = (category: string) => {
+    setActiveCategories(prev => {
+      const newCategories = new Set(prev);
+      if (newCategories.has(category)) newCategories.delete(category);
+      else newCategories.add(category);
+      setActiveMonitors(null);
+      return Array.from(newCategories);
+    });
+  };
+
+  const categoryFilteredMonitors = monitorNames.filter(name => activeCategories.includes(getMonitorCategory(name))).sort();
+  const displayedMonitors = activeMonitors ?? categoryFilteredMonitors;
 
   return (
     <div className="min-h-screen p-8">
-      <header className="mb-8">
-        <h1 className="text-4xl font-bold text-center">服务器监控面板</h1>
-      </header>
-
+      <header className="mb-8"><h1 className="text-4xl font-bold text-center">服务器监控面板</h1></header>
       <main>
         <section className="mb-12">
           <h2 className="text-2xl font-semibold mb-4">服务器状态</h2>
@@ -390,17 +302,8 @@ export default function Home() {
               <div key={rowIndex}>
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
                   {serverRow.map((server) => (
-                    <Card
-                      key={server.id}
-                      className={`cursor-pointer transition-all ${selectedServer?.id === server.id ? 'ring-2 ring-blue-500' : ''}`}
-                      onClick={() => handleServerSelect(server)}
-                    >
-                      <CardHeader>
-                        <CardTitle className="flex items-center justify-between">
-                          <span className="text-lg font-bold">{server.名称}</span>
-                          <span className={`fi fi-${server.国家.toLowerCase()}`}></span>
-                        </CardTitle>
-                      </CardHeader>
+                    <Card key={server.id} className={`cursor-pointer transition-all ${selectedServer?.id === server.id ? 'ring-2 ring-blue-500' : ''}`} onClick={() => handleServerSelect(server)}>
+                      <CardHeader><CardTitle className="flex items-center justify-between"><span className="text-lg font-bold">{server.名称}</span><span className={`fi fi-${server.国家.toLowerCase()}`}></span></CardTitle></CardHeader>
                       <CardContent className="text-sm space-y-2">
                         <p>CPU: {server.CPU}</p>
                         <p>内存: {server.已用内存} / {server.总内存}</p>
@@ -415,18 +318,11 @@ export default function Home() {
                     </Card>
                   ))}
                 </div>
-
-                {/* --- 动态插入详情区域 --- */}
                 {selectedServer && serverRow.some(s => s.id === selectedServer.id) && (
                   <section className="mt-6">
-                    <h2 className="text-2xl font-semibold mb-4">
-                      {selectedServer.名称} - 详细信息与实时监控
-                    </h2>
+                    <h2 className="text-2xl font-semibold mb-4">{selectedServer.名称} - 详细信息与实时监控</h2>
                     <Tabs defaultValue="details" className="mt-6">
-                      <TabsList className="grid w-full grid-cols-2">
-                        <TabsTrigger value="details">详细信息</TabsTrigger>
-                        <TabsTrigger value="tcping">TCPing 延迟 (ms)</TabsTrigger>
-                      </TabsList>
+                      <TabsList className="grid w-full grid-cols-2"><TabsTrigger value="details">详细信息</TabsTrigger><TabsTrigger value="tcping">TCPing 延迟 (ms)</TabsTrigger></TabsList>
                       <TabsContent value="details">
                         <Card>
                           <CardHeader><CardTitle>详细信息</CardTitle></CardHeader>
@@ -442,98 +338,36 @@ export default function Home() {
                         </Card>
                       </TabsContent>
                       <TabsContent value="tcping">
-                <Card>
-                  <CardHeader>
-                    <div className="flex justify-between items-center">
-                      <CardTitle>TCPing 延迟 (ms)</CardTitle>
-                      {tcpingData.length > 1 && (
-                        <p className="text-xs text-muted-foreground">
-                          {new Date(tcpingData[0].created_at).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })} - {new Date(tcpingData[tcpingData.length - 1].created_at).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}
-                        </p>
-                      )}
-                    </div>
-                  </CardHeader>
-                  <CardContent className="pt-6">
-                            <div className="mb-4 flex flex-wrap gap-x-4 gap-y-2 text-sm text-muted-foreground">
-                      {tcpingData.length > 0 && monitorNames.map((name, index) => {
-                        const latestDataPoint = tcpingData[tcpingData.length - 1];
-                        const value = latestDataPoint[name];
-                        return (
-                          <div key={name} className="flex items-center gap-2">
-                            <span className="h-2 w-2 rounded-full" style={{ backgroundColor: getDistinctColor(index) }} />
-                            <span>{name}: <strong>{value != null ? `${value.toFixed(2)} ms` : 'N/A'}</strong></span>
-                          </div>
-                        );
-                      })}
+                        <Card>
+                          <CardHeader><div className="flex justify-between items-center"><CardTitle>TCPing 延迟 (ms)</CardTitle><DateRangePicker value={date} onChange={(value) => setDate(value || { start: today(getLocalTimeZone()).subtract({ days: 7 }), end: today(getLocalTimeZone()) })} /></div></CardHeader>
+                          <CardContent className="pt-6">
+                            <div className="mb-4 flex flex-wrap gap-2">
+                              {MONITOR_CATEGORIES.map(category => (<Button key={category} variant={activeCategories.includes(category) ? "default" : "outline"} size="sm" onClick={() => handleCategoryClick(category)}>{category}</Button>))}
                             </div>
-                            {isLoadingTcping ? (
-                              <Skeleton className="h-[300px] w-full" />
-                            ) : (
-                              <ChartContainer
-                                config={monitorNames.reduce((acc, name, index) => {
-                                  acc[name] = {
-                                    label: name,
-                                    color: getDistinctColor(index),
-                                  };
-                                  return acc;
-                                }, {} as ChartConfig)}
-                                className="aspect-auto h-[300px] w-full"
-                              >
+                            <div className="grid grid-cols-2 gap-px border-l border-t bg-border sm:grid-cols-3 lg:grid-cols-6">
+                              {tcpingData.length > 0 && categoryFilteredMonitors.map(name => {
+                                const latestDataPoint = tcpingData[tcpingData.length - 1];
+                                const value = latestDataPoint?.[name];
+                                const isActive = !activeMonitors || activeMonitors.includes(name);
+                                return (
+                                  <div key={name} className={`cursor-pointer p-3 text-center transition-opacity ${isActive ? 'bg-secondary opacity-100' : 'bg-background opacity-50 hover:opacity-75'}`} onClick={() => handleMonitorClick(name)}>
+                                    <p className="truncate text-sm text-muted-foreground">{name}</p>
+                                    <p className="text-xl font-bold">{value != null ? `${value.toFixed(2)}ms` : 'N/A'}</p>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                            {isLoadingTcping ? (<Skeleton className="h-[300px] w-full" />) : (
+                              <ChartContainer config={displayedMonitors.reduce((acc, name) => { const index = monitorNames.indexOf(name); acc[name] = { label: name, color: getDistinctColor(index) }; return acc; }, {} as ChartConfig)} className="aspect-auto h-[300px] w-full">
                                 <AreaChart data={tcpingData}>
                                   <defs>
-                                    {monitorNames.map((name, index) => {
-                                      const color = getDistinctColor(index);
-                                      return (
-                                        <linearGradient key={`color-${name}`} id={`color-${name}`} x1="0" y1="0" x2="0" y2="1">
-                                          <stop offset="5%" stopColor={color} stopOpacity={0.8} />
-                                          <stop offset="95%" stopColor={color} stopOpacity={0.1} />
-                                        </linearGradient>
-                                      );
-                                    })}
+                                    {monitorNames.map((name, index) => { const color = getDistinctColor(index); return (<linearGradient key={`color-${name}`} id={`color-${name}`} x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor={color} stopOpacity={0.8} /><stop offset="95%" stopColor={color} stopOpacity={0.1} /></linearGradient>); })}
                                   </defs>
                                   <CartesianGrid vertical={false} />
-                                  <XAxis
-                                    dataKey="created_at"
-                                    tickLine={false}
-                                    axisLine={false}
-                                    tickMargin={8}
-                                    minTickGap={32}
-                                    type="number"
-                                    scale="time"
-                                    domain={['dataMin', 'dataMax']}
-                                    tickFormatter={(unixTime) => new Date(unixTime).toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit' })}
-                                  />
-                                  <ChartTooltip
-                                    cursor={false}
-                                    content={
-                                      <ChartTooltipContent
-                                        labelFormatter={(value) => new Date(value).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}
-                                        indicator="dot"
-                                      />
-                                    }
-                                  />
-                                  <ChartLegend content={
-                                    <ChartLegendContent payload={
-                                      monitorNames.map((name, index) => ({
-                                        value: name,
-                                        color: getDistinctColor(index),
-                                        type: "line" as const
-                                      })).reverse()
-                                    } />
-                                  } />
-                                  {monitorNames.map((name, index) => {
-                                    return (
-                                      <Area
-                                        key={name}
-                                        dataKey={name}
-                                        type="natural"
-                                        fill={`url(#color-${name})`}
-                                        stroke={getDistinctColor(index)}
-                                        stackId="a"
-                                        animationDuration={300}
-                                      />
-                                    );
-                                  })}
+                                  <XAxis dataKey="created_at" tickLine={false} axisLine={false} tickMargin={8} minTickGap={32} type="number" scale="time" domain={['dataMin', 'dataMax']} tickFormatter={(unixTime) => new Date(unixTime).toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit' })} />
+                                  <ChartTooltip cursor={true} content={<ChartTooltipContent labelFormatter={(value) => { if (typeof value !== 'number' || value === null) return '...'; const date = new Date(value); if (isNaN(date.getTime())) return 'Invalid Date'; return date.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }); }} indicator="dot" />} />
+                                  <ChartLegend content={<ChartLegendContent />} />
+                                  {displayedMonitors.map((name) => { const index = monitorNames.indexOf(name); return (<Area key={name} dataKey={name} type="natural" fill={`url(#color-${name})`} stroke={getDistinctColor(index)} stackId="a" animationDuration={300} />); })}
                                 </AreaChart>
                               </ChartContainer>
                             )}
