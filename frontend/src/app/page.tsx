@@ -181,13 +181,17 @@ export default function Home() {
   const [selectedServer, setSelectedServer] = useState<TranslatedServer | null>(null);
   const [isLoadingTcping, setIsLoadingTcping] = useState(true);
   const [date, setDate] = useState({
-    start: today(getLocalTimeZone()).subtract({ days: 7 }),
+    start: today(getLocalTimeZone()).subtract({ days: 1 }),
     end: today(getLocalTimeZone()),
   });
-  const [activeRangeLabel, setActiveRangeLabel] = useState("7D");
+  const [activeRangeLabel, setActiveRangeLabel] = useState("24H");
   const { setTheme, theme } = useTheme();
   const [activeMonitors, setActiveMonitors] = useState<string[] | null>(null);
   const [activeCategories, setActiveCategories] = useState<string[]>(["移动", "联通", "电信"]);
+  const [allLocations, setAllLocations] = useState<string[]>([]);
+  const [activeLocations, setActiveLocations] = useState<string[]>(["上海", "北京", "广东", "广州"]);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [insufficientDataMessage, setInsufficientDataMessage] = useState<string>("");
   const selectedServerIdRef = useRef<number | null>(null);
   const monitorNamesRef = useRef(monitorNames);
   monitorNamesRef.current = monitorNames;
@@ -219,15 +223,18 @@ export default function Home() {
   useEffect(() => {
     if (!selectedServer) return;
     setIsLoadingTcping(true);
-    setTcpingData([]);
     setMonitorNames([]);
 
     const fetchAndProcessTcpingData = async () => {
+      setInsufficientDataMessage("");
       try {
         let url = `http://localhost:8000/api/tcping/${selectedServer.id}`;
         const params = new URLSearchParams();
-        if (date?.start) params.append("since", date.start.toDate(getLocalTimeZone()).toISOString());
-        if (date?.end) params.append("until", date.end.toDate(getLocalTimeZone()).toISOString());
+        // Always fetch a generous 7-day window to ensure we have enough data for client-side filtering.
+        const now = new Date();
+        const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+        params.append("since", sevenDaysAgo.toISOString());
+        params.append("until", now.toISOString());
         params.append("resample", "5m");
         const queryString = params.toString();
         if (queryString) url += `?${queryString}`;
@@ -245,41 +252,62 @@ export default function Home() {
           newMonitors.add(point.monitor_name);
         });
         const newChartData: TransformedTcpingData[] = Object.values(transformed);
-        const allMonitorNames = Array.from(new Set([...monitorNamesRef.current, ...newMonitors])).filter(name => name != null);
+        const allMonitorNames = Array.from(newMonitors).filter(name => name != null);
         setMonitorNames(allMonitorNames);
 
-        setTcpingData(currentData => {
+        const locations = new Set<string>();
+        const knownPrefixes = ["上海", "北京", "广东", "广州", "江苏"];
+        allMonitorNames.forEach(name => {
+          for (const prefix of knownPrefixes) {
+            if (name.startsWith(prefix)) {
+              locations.add(prefix);
+              break;
+            }
+          }
+        });
+        setAllLocations(Array.from(locations).sort());
+
+        setTcpingData(() => {
           const dataMap = new Map<number, TransformedTcpingData>();
-          [...currentData, ...newChartData].forEach(item => dataMap.set(item.created_at, item));
-          const combinedData = Array.from(dataMap.values()).sort((a, b) => a.created_at - b.created_at);
+          newChartData.forEach(item => dataMap.set(item.created_at, item));
+          const freshData = Array.from(dataMap.values()).sort((a, b) => a.created_at - b.created_at);
           const lastKnownValues: { [key: string]: number } = {};
           allMonitorNames.forEach(name => {
-            const firstPoint = combinedData.find(p => p[name] !== undefined);
+            const firstPoint = freshData.find(p => p[name] !== undefined);
             if (firstPoint) lastKnownValues[name] = firstPoint[name] as number;
           });
-          combinedData.forEach(dataPoint => {
+          freshData.forEach(dataPoint => {
             allMonitorNames.forEach(name => {
               if (dataPoint[name] !== undefined) lastKnownValues[name] = dataPoint[name];
               else dataPoint[name] = lastKnownValues[name];
             });
           });
-          return combinedData;
+          return freshData;
         });
       } catch (error) {
         console.error(`获取 TCPing 数据失败:`, error);
+        if (activeRangeLabel) {
+          setInsufficientDataMessage(`获取数据失败，无法显示${activeRangeLabel}的图表`);
+        } else {
+          setInsufficientDataMessage("获取数据失败，无法显示图表");
+        }
       } finally {
         setIsLoadingTcping(false);
       }
     };
     fetchAndProcessTcpingData();
-  }, [selectedServer?.id, date]);
+  }, [selectedServer?.id, refreshKey]);
 
   const handleTimeRangeClick = (range: any, label: string) => {
-    setDate({
-      start: today(getLocalTimeZone()).subtract(range),
-      end: today(getLocalTimeZone()),
-    });
-    setActiveRangeLabel(label);
+    if (label === activeRangeLabel) {
+      setRefreshKey(prev => prev + 1);
+    } else {
+      setDate({
+        start: today(getLocalTimeZone()).subtract(range),
+        end: today(getLocalTimeZone()),
+      });
+      setActiveRangeLabel(label);
+    }
   };
 
   const handleServerSelect = (server: TranslatedServer) => {
@@ -308,8 +336,53 @@ export default function Home() {
     });
   };
 
-  const categoryFilteredMonitors = monitorNames.filter(name => activeCategories.includes(getMonitorCategory(name))).sort();
+  const handleLocationClick = (location: string) => {
+    setActiveLocations(prev => {
+      const newLocations = new Set(prev);
+      if (newLocations.has(location)) {
+        newLocations.delete(location);
+      } else {
+        newLocations.add(location);
+      }
+      setActiveMonitors(null);
+      return Array.from(newLocations);
+    });
+  };
+
+  const categoryFilteredMonitors = monitorNames.filter(name =>
+    activeCategories.includes(getMonitorCategory(name)) &&
+    activeLocations.some(location => name.includes(location))
+  ).sort();
   const displayedMonitors = activeMonitors ?? categoryFilteredMonitors;
+
+  // This is the definitive, correct filtering logic.
+  const getFilteredData = () => {
+    const now = new Date().getTime();
+
+    // Case 1: A quick time range button is active (e.g., "1H", "7D").
+    if (activeRangeLabel) {
+      const range = timeRanges.find(r => r.label === activeRangeLabel);
+      if (!range) return []; // Should not happen
+
+      const durationInMs = (range.value.hours || 0) * 3600 * 1000 + (range.value.days || 0) * 86400 * 1000;
+      const startTime = now - durationInMs;
+      
+      return tcpingData.filter(d => d.created_at >= startTime && d.created_at <= now);
+    }
+    
+    // Case 2: A custom date range is selected from the picker.
+    else {
+      const startTime = date.start.toDate(getLocalTimeZone()).getTime();
+      const endOfDay = date.end.toDate(getLocalTimeZone());
+      endOfDay.setHours(23, 59, 59, 999); // Include the entire end day
+      const endTime = endOfDay.getTime();
+      
+      return tcpingData.filter(d => d.created_at >= startTime && d.created_at <= endTime);
+    }
+  };
+
+  const filteredTcpingData = getFilteredData();
+  const isDataInsufficient = !isLoadingTcping && filteredTcpingData.length < 2;
 
   return (
     <div className="min-h-screen p-8">
@@ -367,7 +440,7 @@ export default function Home() {
                       </TabsContent>
                       <TabsContent value="tcping">
                         <Card>
-                          <CardHeader><div className="flex justify-between items-center"><CardTitle>TCPing 延迟 (ms)</CardTitle><DateRangePicker value={date} onChange={(value) => { setDate(value || { start: today(getLocalTimeZone()).subtract({ days: 7 }), end: today(getLocalTimeZone()) }); setActiveRangeLabel(""); }} /></div></CardHeader>
+                          <CardHeader><div className="flex justify-between items-center"><CardTitle>TCPing 延迟 (ms)</CardTitle><DateRangePicker value={date} onChange={(value) => { if(value) { setDate(value); setActiveRangeLabel(""); } }} /></div></CardHeader>
                           <CardContent className="pt-6">
                             <div className="mb-4 flex items-center justify-between">
                               <div className="flex flex-wrap gap-2">
@@ -384,7 +457,26 @@ export default function Home() {
                                     {label}
                                   </Button>
                                 ))}
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  onClick={() => setRefreshKey(prev => prev + 1)}
+                                >
+                                  刷新
+                                </Button>
                               </div>
+                            </div>
+                            <div className="mb-4 flex flex-wrap gap-2">
+                              {allLocations.map(location => (
+                                <Button
+                                  key={location}
+                                  variant={activeLocations.includes(location) ? "default" : "outline"}
+                                  size="sm"
+                                  onClick={() => handleLocationClick(location)}
+                                >
+                                  {location}
+                                </Button>
+                              ))}
                             </div>
                             <div className="grid grid-cols-2 gap-px border-l border-t bg-border sm:grid-cols-3 lg:grid-cols-6">
                               {tcpingData.length > 0 && categoryFilteredMonitors.map(name => {
@@ -399,9 +491,13 @@ export default function Home() {
                                 );
                               })}
                             </div>
-                            {isLoadingTcping ? (<Skeleton className="h-[300px] w-full" />) : (
+                            {isLoadingTcping ? (<Skeleton className="h-[300px] w-full" />) : isDataInsufficient ? (
+                              <div className="flex h-[300px] w-full items-center justify-center">
+                                <p className="text-muted-foreground">{insufficientDataMessage || `当前数据量不足${activeRangeLabel || '所选范围'}无法显示，等待后台数据补充之后方可显示`}</p>
+                              </div>
+                            ) : (
                               <ChartContainer config={displayedMonitors.reduce((acc, name) => { const index = monitorNames.indexOf(name); acc[name] = { label: name, color: getDistinctColor(index) }; return acc; }, {} as ChartConfig)} className="aspect-auto h-[300px] w-full">
-                                <AreaChart data={tcpingData}>
+                                <AreaChart data={filteredTcpingData}>
                                   <defs>
                                     {monitorNames.map((name, index) => { const color = getDistinctColor(index); return (<linearGradient key={`color-${name}`} id={`color-${name}`} x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor={color} stopOpacity={0.8} /><stop offset="95%" stopColor={color} stopOpacity={0.1} /></linearGradient>); })}
                                   </defs>
