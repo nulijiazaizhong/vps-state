@@ -7,6 +7,7 @@ import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContai
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { DateRangePicker } from "@/components/ui/date-range-picker";
+import { ThemeSwitcher } from "@/components/ui/theme-switcher";
 import {
   ChartConfig,
   ChartContainer,
@@ -16,7 +17,8 @@ import {
   ChartTooltipContent,
 } from "@/components/ui/chart";
 import { today, getLocalTimeZone } from "@internationalized/date";
-import { useDateFormatter } from "react-aria";
+import { useDateFormatter, useLocale } from "react-aria";
+import { useTheme } from "next-themes";
 
 // --- 从后端API获取的服务器数据类型 (JOINed) ---
 interface Server {
@@ -164,6 +166,14 @@ const getMonitorCategory = (name: string): string => {
 };
 
 // --- 主页面组件 ---
+
+const timeRanges = [
+  { label: "1H", value: { hours: 1 } },
+  { label: "6H", value: { hours: 6 } },
+  { label: "24H", value: { days: 1 } },
+  { label: "7D", value: { days: 7 } },
+];
+
 export default function Home() {
   const [servers, setServers] = useState<TranslatedServer[]>([]);
   const [tcpingData, setTcpingData] = useState<TransformedTcpingData[]>([]);
@@ -174,6 +184,8 @@ export default function Home() {
     start: today(getLocalTimeZone()).subtract({ days: 7 }),
     end: today(getLocalTimeZone()),
   });
+  const [activeRangeLabel, setActiveRangeLabel] = useState("7D");
+  const { setTheme, theme } = useTheme();
   const [activeMonitors, setActiveMonitors] = useState<string[] | null>(null);
   const [activeCategories, setActiveCategories] = useState<string[]>(["移动", "联通", "电信"]);
   const selectedServerIdRef = useRef<number | null>(null);
@@ -262,6 +274,14 @@ export default function Home() {
     fetchAndProcessTcpingData();
   }, [selectedServer?.id, date]);
 
+  const handleTimeRangeClick = (range: any, label: string) => {
+    setDate({
+      start: today(getLocalTimeZone()).subtract(range),
+      end: today(getLocalTimeZone()),
+    });
+    setActiveRangeLabel(label);
+  };
+
   const handleServerSelect = (server: TranslatedServer) => {
     setSelectedServer(server);
     selectedServerIdRef.current = server.id;
@@ -293,7 +313,15 @@ export default function Home() {
 
   return (
     <div className="min-h-screen p-8">
-      <header className="mb-8"><h1 className="text-4xl font-bold text-center">服务器监控面板</h1></header>
+      <header className="mb-8 flex items-center justify-between">
+        <h1 className="text-4xl font-bold text-center">服务器监控面板</h1>
+        <ThemeSwitcher
+          value={theme}
+          onChange={(value: "light" | "dark" | "system") => {
+            setTheme(value);
+          }}
+        />
+      </header>
       <main>
         <section className="mb-12">
           <h2 className="text-2xl font-semibold mb-4">服务器状态</h2>
@@ -339,10 +367,24 @@ export default function Home() {
                       </TabsContent>
                       <TabsContent value="tcping">
                         <Card>
-                          <CardHeader><div className="flex justify-between items-center"><CardTitle>TCPing 延迟 (ms)</CardTitle><DateRangePicker value={date} onChange={(value) => setDate(value || { start: today(getLocalTimeZone()).subtract({ days: 7 }), end: today(getLocalTimeZone()) })} /></div></CardHeader>
+                          <CardHeader><div className="flex justify-between items-center"><CardTitle>TCPing 延迟 (ms)</CardTitle><DateRangePicker value={date} onChange={(value) => { setDate(value || { start: today(getLocalTimeZone()).subtract({ days: 7 }), end: today(getLocalTimeZone()) }); setActiveRangeLabel(""); }} /></div></CardHeader>
                           <CardContent className="pt-6">
-                            <div className="mb-4 flex flex-wrap gap-2">
-                              {MONITOR_CATEGORIES.map(category => (<Button key={category} variant={activeCategories.includes(category) ? "default" : "outline"} size="sm" onClick={() => handleCategoryClick(category)}>{category}</Button>))}
+                            <div className="mb-4 flex items-center justify-between">
+                              <div className="flex flex-wrap gap-2">
+                                {MONITOR_CATEGORIES.map(category => (<Button key={category} variant={activeCategories.includes(category) ? "default" : "outline"} size="sm" onClick={() => handleCategoryClick(category)}>{category}</Button>))}
+                              </div>
+                              <div className="flex flex-wrap gap-2">
+                                {timeRanges.map(({ label, value }) => (
+                                  <Button
+                                    key={label}
+                                    variant={activeRangeLabel === label ? "default" : "outline"}
+                                    size="sm"
+                                    onClick={() => handleTimeRangeClick(value, label)}
+                                  >
+                                    {label}
+                                  </Button>
+                                ))}
+                              </div>
                             </div>
                             <div className="grid grid-cols-2 gap-px border-l border-t bg-border sm:grid-cols-3 lg:grid-cols-6">
                               {tcpingData.length > 0 && categoryFilteredMonitors.map(name => {
